@@ -25,6 +25,23 @@ class Evaluator:
         self.prompts = self._load_prompts()
         self.grading_prompt = self._load_grading_prompt()
         
+        # 结果和统计
+        self.results = []
+        self.stats = {
+            "total_samples": 0,
+            "processed_samples": 0,
+            "high_quality_count": 0,
+            "low_quality_count": 0,
+            "total_generation_time": 0,
+            "total_grading_time": 0,
+            "start_time": time.time(),
+        }
+        
+        # 添加: 跟踪最近的高分
+        self.recent_scores = []  # 存储最近5个结果的分数
+        self.recent_best_scores = []  # 存储最近5个结果的最高分数
+        self.recent_max_len = 5  # 保留最近几个样本的数据
+        
         # 过滤要使用的prompt
         if config.prompt_keys:
             filtered_prompts = {}
@@ -200,6 +217,29 @@ class Evaluator:
                 logging.warning(f"无法为图像评分: {img_path}")
                 return
             
+            if scored_candidates:
+                # 选择最佳结果
+                best_result = self.rejection_sampler.select_best_candidate(scored_candidates)
+                
+                # 保存结果
+                await self._save_result(img_path, best_result, scored_candidates)
+                
+                # 更新最近分数列表
+                async with self.progress_lock:
+                    # 记录所有候选的平均分
+                    avg_score = sum(c["score"] for c in scored_candidates) / len(scored_candidates)
+                    self.recent_scores.append(avg_score)
+                    
+                    # 记录最高分
+                    best_score = best_result["score"]
+                    self.recent_best_scores.append(best_score)
+                    
+                    # 保持列表长度
+                    if len(self.recent_scores) > self.recent_max_len:
+                        self.recent_scores.pop(0)
+                    if len(self.recent_best_scores) > self.recent_max_len:
+                        self.recent_best_scores.pop(0)
+            
             # 选择最佳结果 - 使用评分API确定的最佳结果或分数最高的
             best_result = None
             for candidate in scored_candidates:
@@ -237,6 +277,26 @@ class Evaluator:
         
         except Exception as e:
             logging.error(f"处理图像时出错 {img_path}: {str(e)}", exc_info=True)
+            
+            
+        finally:
+            # 更新进度条信息
+            if self.recent_best_scores:
+                recent_max = max(self.recent_best_scores)
+                recent_avg = sum(self.recent_best_scores) / len(self.recent_best_scores)
+                
+                progress_desc = (
+                    f"进度: {self.stats['processed_samples']}/{self.stats['total_samples']} | "
+                    f"最近最高分: {recent_max:.1f} | "
+                    f"最近平均最高分: {recent_avg:.1f} | "
+                    f"高/低质量: {self.stats['high_quality_count']}/{self.stats['low_quality_count']}"
+                )
+                progress_bar.set_description(progress_desc)
+            
+            # 更新进度条和已处理项
+            progress_bar.update(1)
+            self.processed_items.add(img_path)
+
     
     async def _generate_for_all_prompts(self, session, semaphore, img_path: str, image_base64: str) -> List[Dict[str, Any]]:
         """为所有提示词生成结果"""
