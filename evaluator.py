@@ -178,13 +178,13 @@ class Evaluator:
         # 如果已经处理过，跳过
         if img_path in self.processed_items:
             return
-                
+        
         try:
             # 确认文件存在
             if not os.path.exists(img_path):
                 logging.error(f"图片不存在: {img_path}")
                 return
-                
+                    
             # 编码图片
             image_base64 = self.image_processor.encode_image(img_path)
             
@@ -194,18 +194,26 @@ class Evaluator:
                 logging.warning(f"无法为图像生成候选结果: {img_path}")
                 return
             
-            # 评分所有候选结果
-            scored_candidates = await self._grade_candidates(session, grade_semaphore, candidate_results)
+            # 一次性评分所有候选结果
+            scored_candidates = await self._grade_candidates(session, grade_semaphore, img_path, image_base64, candidate_results)
             if not scored_candidates:
                 logging.warning(f"无法为图像评分: {img_path}")
                 return
             
-            # 选择最佳结果
-            best_result = self.rejection_sampler.select_best_candidate(scored_candidates)
+            # 选择最佳结果 - 使用评分API确定的最佳结果或分数最高的
+            best_result = None
+            for candidate in scored_candidates:
+                if candidate.get("is_best", False):
+                    best_result = candidate
+                    break
+            
+            # 如果评分API没有指定最佳结果，则选择分数最高的
+            if not best_result:
+                best_result = self.rejection_sampler.select_best_candidate(scored_candidates)
             
             # 保存结果
             await self._save_result(img_path, best_result, scored_candidates)
-            
+                    
             # 更新统计信息
             async with self.progress_lock:
                 self.stats['processed_samples'] += 1
@@ -298,19 +306,51 @@ class Evaluator:
                 logging.error(f"为提示词 {prompt_key} 生成结果时出错: {str(e)}")
                 return None
     
-    async def _grade_candidates(self, session, semaphore, candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """评分所有候选结果"""
-        # 准备评分任务
-        tasks = []
-        for candidate in candidates:
-            task = self._grade_single_candidate(session, semaphore, candidate)
-            tasks.append(task)
-        
-        # 并行执行所有评分任务
-        scored_candidates = await asyncio.gather(*tasks)
-        
-        # 过滤掉评分失败的结果
-        return [c for c in scored_candidates if c is not None]
+    async def _grade_candidates(self, session, grade_semaphore, img_path: str, image_base64: str, candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """一次性评分所有候选结果"""
+        if not candidates:
+            return []
+            
+        async with grade_semaphore:
+            try:
+                # 构建评分提示
+                grading_template = self.grading_prompt["template"]
+                
+                # 调用评分API，同时发送图像和所有候选
+                start_time = time.time()
+                grading_result = await self.grading_client.grade_multiple_candidates(
+                    session, 
+                    grading_template, 
+                    candidates,
+                    image_base64
+                )
+                grading_time = time.time() - start_time
+                
+                # 更新统计
+                self.stats['total_grading_time'] += grading_time
+                
+                # 处理评分结果
+                if "error" not in grading_result:
+                    # 为每个候选更新评分
+                    for i, candidate in enumerate(candidates):
+                        if i < len(grading_result["scores"]):
+                            # 添加评分信息到候选结果
+                            candidate["score"] = grading_result["scores"][i]
+                            candidate["is_best"] = (i == grading_result["best_index"])
+                            candidate["grading_time"] = grading_time
+                    
+                    # 记录整体评分解释
+                    candidates[0]["score_explanation"] = grading_result["content"]
+                    
+                    return candidates
+                else:
+                    logging.warning(f"评分时出错: {grading_result.get('error', 'Unknown error')}")
+                    return []
+                
+            except Exception as e:
+                logging.error(f"评分候选结果时出错: {str(e)}", exc_info=True)
+                return []
+
     
     async def _grade_single_candidate(self, session, semaphore, candidate: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """评分单个候选结果"""

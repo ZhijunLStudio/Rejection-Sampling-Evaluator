@@ -13,6 +13,12 @@ class RejectionSampler:
             logging.error("没有可选的候选结果")
             raise ValueError("没有可选的候选结果")
         
+        # 首先检查是否有被标记为最佳的候选
+        for candidate in scored_candidates:
+            if candidate.get("is_best", False):
+                logging.info(f"使用评分API指定的最佳候选，分数: {candidate['score']:.1f}")
+                return candidate
+        
         # 按分数降序排序
         sorted_candidates = sorted(
             scored_candidates, 
@@ -36,6 +42,7 @@ class RejectionSampler:
         best_candidate = sorted_candidates[0]
         logging.info(f"没有找到高质量候选结果，使用最高分候选，分数: {best_candidate['score']:.1f}")
         return best_candidate
+
     
     def analyze_candidates(self, candidates: List[Dict[str, Any]]) -> Dict[str, Any]:
         """分析候选结果"""
