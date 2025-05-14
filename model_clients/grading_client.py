@@ -68,7 +68,7 @@ class GradingClient:
                 f"{self.api_base}/chat/completions",
                 headers=headers, 
                 json=data,
-                timeout=600
+                timeout=1200
             ) as response:
                 response_json = await response.json()
                 end_time = time.time()
@@ -196,7 +196,7 @@ class GradingClient:
                 f"{self.api_base}/chat/completions",
                 headers=headers, 
                 json=data,
-                timeout=600
+                timeout=1200
             ) as response:
                 response_json = await response.json()
                 end_time = time.time()
